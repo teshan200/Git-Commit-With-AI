@@ -92,10 +92,16 @@ python git_agent.py
 
 The agent can work with any repository.
 
-In ADK Web, first tell the agent which repository to use:
+In ADK Web, first send a chat message that includes the repository path you want to use:
 
 ```text
 set repo path "C:\Users\MSI\Desktop\test repo"
+```
+
+Another example:
+
+```text
+set repo path "D:\Projects\my-app"
 ```
 
 After that, all Git operations in that session use that repository.
@@ -126,9 +132,19 @@ git status
 
 You should see files listed under `Changes to be committed`.
 
-### 2. Ask for a commit message
+### 2. Send the repo path in chat
 
-In the ADK Web chat, after setting the repo path, ask:
+In the ADK Web chat, tell the agent which repository to use:
+
+```text
+set repo path "C:\Users\MSI\Desktop\test repo"
+```
+
+Wait for the agent to confirm that the repository path was saved for the session.
+
+### 3. Ask for a commit message
+
+After setting the repo path, ask:
 
 ```text
 write a commit message for my staged changes
@@ -141,7 +157,7 @@ The agent will:
 3. Draft a Conventional Commit message
 4. Ask for confirmation before committing
 
-### 3. Confirm the commit
+### 4. Confirm the commit
 
 Reply with something explicit, such as:
 
@@ -182,7 +198,7 @@ git remote add origin https://github.com/your-user/your-repo.git
 2. Make a small file change
 3. Stage the change with `git add .`
 4. Start ADK Web with `adk web .`
-5. In chat, set the repository path
+5. In chat, send a message like `set repo path "C:\Users\MSI\Desktop\test repo"`
 6. Ask for a commit message
 7. Confirm the commit
 8. Verify the result with:
@@ -222,6 +238,12 @@ git add .
 ### Repo path is rejected
 
 Make sure you pass the repository root folder, the one that contains `.git`.
+
+Use the exact chat format:
+
+```text
+set repo path "C:\Users\MSI\Desktop\test repo"
+```
 
 ### Push fails
 
