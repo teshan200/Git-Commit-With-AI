@@ -1,0 +1,30 @@
+# Environment variables
+.env
+.env.*
+
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# ADK local state
+.adk/
+
+# IDE and OS files
+.vscode/
+.DS_Store
+Thumbs.db
