@@ -30,6 +30,8 @@ except ImportError:  # pragma: no cover - compatibility fallback for older SDKs.
 from google.genai import types
 import datetime
 import shutil
+import requests
+from urllib.parse import urlparse
 
 
 ENV_FILE = Path(__file__).with_name(".env")
@@ -414,7 +416,12 @@ def auto_branch_commit_and_pr(commit_message: str, pr_title: str | None, pr_body
     # 4) create PR
     title = pr_title or (commit_message.splitlines()[0] if commit_message else branch_name)
     body = pr_body or commit_message
-    pr_res = create_github_pr(title, body, base, tool_context)
+    # Prefer API upsert if token available, otherwise fall back to gh CLI path
+    if os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN"):
+        pr_res = create_or_update_pr(title, body, base, tool_context)
+    else:
+        pr_res = create_github_pr(title, body, base, tool_context)
+
     if pr_res.get("status") != "success":
         return {"status": "error", "step": "create_pr", "result": pr_res}
 
@@ -425,6 +432,100 @@ def auto_branch_commit_and_pr(commit_message: str, pr_title: str | None, pr_body
         "push": push_res,
         "pr": pr_res,
     }
+
+
+def _parse_github_remote(remote_url: str) -> tuple[str, str] | None:
+    """Parse a GitHub remote URL into (owner, repo) or return None.
+
+    Supports formats like:
+      git@github.com:owner/repo.git
+      https://github.com/owner/repo.git
+    """
+
+    if not remote_url:
+        return None
+
+    # SSH format
+    if remote_url.startswith("git@"):
+        try:
+            _, path = remote_url.split(":", 1)
+            owner, repo = path.rstrip(".git").split("/", 1)
+            return owner, repo
+        except Exception:
+            return None
+
+    # Try URL parse
+    try:
+        parsed = urlparse(remote_url)
+        host = parsed.hostname or ""
+        if "github.com" not in host:
+            return None
+        path = parsed.path.lstrip("/")
+        owner, repo = path.rstrip(".git").split("/", 1)
+        return owner, repo
+    except Exception:
+        return None
+
+
+def create_or_update_pr(title: str, body: str, base: str | None, tool_context: ToolContext) -> dict[str, Any]:
+    """Create or update a GitHub PR via the REST API.
+
+    Requires `GITHUB_TOKEN` (or `GH_TOKEN`) in environment for authentication.
+    """
+
+    token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+    if not token:
+        return {"status": "error", "error_message": "Missing GITHUB_TOKEN or GH_TOKEN in environment."}
+
+    try:
+        repo_path = _get_active_repo_path(tool_context)
+        remote_url = _run_git_command(["git", "remote", "get-url", "origin"], repo_path)
+    except Exception as exc:
+        return {"status": "error", "error_message": "Failed to determine remote URL.", "details": str(exc)}
+
+    parsed = _parse_github_remote(remote_url)
+    if not parsed:
+        return {"status": "error", "error_message": f"Unsupported or non-GitHub remote URL: {remote_url}"}
+
+    owner, repo = parsed
+    branch = _run_git_command(["git", "branch", "--show-current"], repo_path) or ""
+    if not branch:
+        return {"status": "error", "error_message": "No current branch (detached HEAD)."}
+
+    api_base = f"https://api.github.com/repos/{owner}/{repo}"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+
+    # Check for existing PR for this head
+    try:
+        params = {"head": f"{owner}:{branch}"}
+        if base:
+            params["base"] = base
+        r = requests.get(f"{api_base}/pulls", headers=headers, params=params, timeout=10)
+        r.raise_for_status()
+        prs = r.json()
+    except Exception as exc:
+        return {"status": "error", "error_message": "Failed to list PRs", "details": str(exc)}
+
+    if prs:
+        # Update the first matching PR
+        pr = prs[0]
+        pr_number = pr.get("number")
+        try:
+            payload = {"title": title, "body": body}
+            r = requests.patch(f"{api_base}/pulls/{pr_number}", headers=headers, json=payload, timeout=10)
+            r.raise_for_status()
+            return {"status": "success", "action": "updated", "pr": r.json()}
+        except Exception as exc:
+            return {"status": "error", "error_message": "Failed to update PR", "details": str(exc)}
+
+    # Create a new PR
+    try:
+        payload = {"title": title, "head": branch, "base": base or "main", "body": body}
+        r = requests.post(f"{api_base}/pulls", headers=headers, json=payload, timeout=10)
+        r.raise_for_status()
+        return {"status": "success", "action": "created", "pr": r.json()}
+    except Exception as exc:
+        return {"status": "error", "error_message": "Failed to create PR", "details": str(exc)}
 
 
 def generate_commit_message(tool_context: ToolContext) -> dict[str, Any]:
@@ -703,6 +804,10 @@ def run_cli(argv: list[str] | None = None) -> int:
     p_pr.add_argument("--base", required=False)
 
     p_install = subparsers.add_parser("install-hook", help="Install commit-msg hook to enforce Conventional Commits")
+    p_upsert = subparsers.add_parser("pr-upsert", help="Create or update a GitHub PR via API (requires GITHUB_TOKEN)")
+    p_upsert.add_argument("--title", required=True)
+    p_upsert.add_argument("--body", required=False)
+    p_upsert.add_argument("--base", required=False)
 
     args = parser.parse_args(argv)
 
@@ -795,6 +900,11 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     if args.cmd == "install-hook":
         res = install_commit_msg_hook(None)
+        _print_result(res)
+        return 0 if res.get("status") == "success" else 2
+
+    if args.cmd == "pr-upsert":
+        res = create_or_update_pr(args.title, args.body or "", args.base, None)
         _print_result(res)
         return 0 if res.get("status") == "success" else 2
 
