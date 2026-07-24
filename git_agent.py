@@ -34,6 +34,7 @@ import requests
 from urllib.parse import urlparse
 import time
 import re
+from collections import Counter
 
 
 ENV_FILE = Path(__file__).with_name(".env")
@@ -847,6 +848,12 @@ def run_cli(argv: list[str] | None = None) -> int:
     p_changelog.add_argument("--output", required=False, default="CHANGELOG.md", help="Output file (default: CHANGELOG.md)")
     p_changelog.add_argument("--dry-run", dest="dry_run", action="store_true", help="Print changelog to stdout instead of writing file")
 
+    p_summarize = subparsers.add_parser("summarize", help="Summarize repo changes and diffs")
+    p_summarize.add_argument("--since", required=False, help="Git ref to start from (defaults to most recent tag)")
+    p_summarize.add_argument("--format", required=False, choices=["json", "text"], default="text", help="Output format")
+    p_summarize.add_argument("--output", required=False, help="Write output to file instead of stdout")
+    p_summarize.add_argument("--dry-run", dest="dry_run", action="store_true", help="Preview only (prints summary)")
+
     args = parser.parse_args(argv)
 
     if args.repo:
@@ -972,6 +979,40 @@ def run_cli(argv: list[str] | None = None) -> int:
         res = generate_changelog(args.since, args.output, None, dry_run=args.dry_run)
         _print_result(res)
         return 0 if res.get("status") == "success" else 2
+
+    if args.cmd == "summarize":
+        res = summarize_repo(args.since, None)
+        if args.format == "json":
+            out = json.dumps(res.get("summary") if res.get("status") == "success" else res, indent=2)
+        else:
+            if res.get("status") != "success":
+                _print_result(res)
+                return 2
+            s = res["summary"]
+            lines = []
+            lines.append(f"Repository summary (since: {s.get('since')})")
+            lines.append(f"Total commits: {s.get('total_commits')}")
+            lines.append(f"Lines added: {s.get('lines_added')}, lines removed: {s.get('lines_removed')}")
+            lines.append("Top authors:")
+            for a in s.get("top_authors", []):
+                lines.append(f"- {a['author']}: {a['commits']}")
+            lines.append("Top files:")
+            for f in s.get("top_files", [])[:10]:
+                lines.append(f"- {f['file']}: {f['changes']}")
+            out = "\n".join(lines)
+
+        if args.output:
+            try:
+                with open(args.output, "w", encoding="utf-8") as f:
+                    f.write(out)
+                _print_result({"status": "success", "message": f"Wrote summary to {args.output}"})
+                return 0
+            except Exception as exc:
+                _print_result({"status": "error", "error_message": "Failed to write output", "details": str(exc)})
+                return 2
+
+        print(out)
+        return 0
 
     parser.print_help()
     return 1
@@ -1199,6 +1240,96 @@ def generate_changelog(since: str | None, output: str, tool_context: ToolContext
         return {"status": "success", "message": f"Wrote changelog to {output}", "path": output}
     except Exception as exc:
         return {"status": "error", "error_message": "Failed to write changelog", "details": str(exc)}
+
+
+def summarize_repo(since: str | None, tool_context: ToolContext) -> dict[str, Any]:
+    """Produce repository-level summaries from git history and diffs.
+
+    Returns JSON-friendly dict with commit counts, top authors, top files changed,
+    total lines added/removed, and a small sample of large diffs.
+    """
+
+    try:
+        repo_path = _get_active_repo_path(tool_context) or str(Path.cwd())
+    except Exception:
+        repo_path = str(Path.cwd())
+
+    # determine since ref
+    since_ref = since
+    if not since_ref:
+        try:
+            since_ref = _run_git_command(["git", "describe", "--tags", "--abbrev=0"], repo_path)
+        except subprocess.CalledProcessError:
+            since_ref = None
+
+    pretty = "--pretty=format:--COMMIT--%H%x1f%an%x1f%ad%x1f%s"
+    cmd = ["git", "log", "--no-merges", "--numstat", pretty]
+    if since_ref:
+        cmd.append(f"{since_ref}..HEAD")
+
+    try:
+        raw = subprocess.check_output(cmd, cwd=repo_path, text=True, encoding="utf-8", errors="replace")
+    except subprocess.CalledProcessError as exc:
+        return {"status": "error", "error_message": "git log failed", "details": str(exc)}
+
+    parts = [p for p in raw.split("--COMMIT--") if p.strip()]
+    total_commits = 0
+    authors = Counter()
+    file_changes = Counter()
+    lines_added = 0
+    lines_removed = 0
+    large_files: list[dict[str, Any]] = []
+
+    for part in parts:
+        lines = [l for l in part.splitlines() if l is not None]
+        if not lines:
+            continue
+        header = lines[0]
+        try:
+            sha, author, date, subject = header.split("\x1f", 3)
+        except Exception:
+            continue
+
+        total_commits += 1
+        authors[author] += 1
+
+        # parse numstat lines
+        for nl in lines[1:]:
+            nl = nl.strip()
+            if not nl:
+                continue
+            parts_ns = nl.split("\t")
+            if len(parts_ns) < 3:
+                continue
+            added_s, removed_s, fname = parts_ns[0], parts_ns[1], parts_ns[2]
+            try:
+                added = int(added_s) if added_s != "-" else 0
+                removed = int(removed_s) if removed_s != "-" else 0
+            except ValueError:
+                added = 0
+                removed = 0
+
+            file_changes[fname] += 1
+            lines_added += added
+            lines_removed += removed
+            if added + removed > 200:
+                large_files.append({"file": fname, "added": added, "removed": removed, "sum": added + removed, "commit": sha})
+
+    top_authors = authors.most_common(10)
+    top_files = file_changes.most_common(20)
+    large_files = sorted(large_files, key=lambda x: x["sum"], reverse=True)[:10]
+
+    summary = {
+        "total_commits": total_commits,
+        "top_authors": [{"author": a, "commits": c} for a, c in top_authors],
+        "top_files": [{"file": f, "changes": c} for f, c in top_files],
+        "lines_added": lines_added,
+        "lines_removed": lines_removed,
+        "large_files": large_files,
+        "since": since_ref or "full-history",
+    }
+
+    return {"status": "success", "summary": summary}
 
 
 if __name__ == "__main__":
