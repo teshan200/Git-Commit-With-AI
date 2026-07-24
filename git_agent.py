@@ -804,9 +804,11 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     p_commit = subparsers.add_parser("commit", help="Create a git commit with provided message")
     p_commit.add_argument("--message", required=True)
+    p_commit.add_argument("--dry-run", dest="dry_run", action="store_true", help="Preview commit without making changes")
 
     p_branch = subparsers.add_parser("branch", help="Create and switch to a branch")
     p_branch.add_argument("--name", required=True)
+    p_branch.add_argument("--dry-run", dest="dry_run", action="store_true", help="Preview branch creation without making changes")
 
     p_pr = subparsers.add_parser("pr", help="Create a GitHub PR using gh CLI")
     p_pr.add_argument("--title", required=True)
@@ -818,6 +820,7 @@ def run_cli(argv: list[str] | None = None) -> int:
     p_upsert.add_argument("--title", required=True)
     p_upsert.add_argument("--body", required=False)
     p_upsert.add_argument("--base", required=False)
+    p_upsert.add_argument("--dry-run", dest="dry_run", action="store_true", help="Preview PR create/update without contacting GitHub")
 
     args = parser.parse_args(argv)
 
@@ -894,11 +897,21 @@ def run_cli(argv: list[str] | None = None) -> int:
         return 0 if res.get("status") == "success" else 2
 
     if args.cmd == "commit":
+        if getattr(args, "dry_run", False):
+            repo = _get_active_repo_path(None) or os.getcwd()
+            plan = {"action": "git commit -m", "message": args.message, "repo": repo}
+            _print_result({"status": "success", "dry_run": True, "plan": plan})
+            return 0
         res = execute_git_commit(args.message, None)
         _print_result(res)
         return 0 if res.get("status") == "success" else 2
 
     if args.cmd == "branch":
+        if getattr(args, "dry_run", False):
+            repo = _get_active_repo_path(None) or os.getcwd()
+            plan = {"action": "git checkout -b", "branch": args.name, "repo": repo}
+            _print_result({"status": "success", "dry_run": True, "plan": plan})
+            return 0
         res = create_branch(args.name, None)
         _print_result(res)
         return 0 if res.get("status") == "success" else 2
@@ -914,6 +927,18 @@ def run_cli(argv: list[str] | None = None) -> int:
         return 0 if res.get("status") == "success" else 2
 
     if args.cmd == "pr-upsert":
+        if getattr(args, "dry_run", False):
+            try:
+                repo_path = _get_active_repo_path(None) or os.getcwd()
+                remote_url = _run_git_command(["git", "remote", "get-url", "origin"], repo_path)
+                parsed = _parse_github_remote(remote_url)
+                branch = _run_git_command(["git", "branch", "--show-current"], repo_path)
+                plan = {"owner_repo": parsed, "branch": branch, "title": args.title, "body": args.body or "", "base": args.base or "main"}
+                _print_result({"status": "success", "dry_run": True, "plan": plan})
+                return 0
+            except Exception as exc:
+                _print_result({"status": "error", "error_message": "Failed to preview PR upsert", "details": str(exc)})
+                return 2
         res = create_or_update_pr(args.title, args.body or "", args.base, None)
         _print_result(res)
         return 0 if res.get("status") == "success" else 2
