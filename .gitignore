@@ -20,6 +20,7 @@ htmlcov/
 venv/
 env/
 ENV/
+!.env.example
 
 # ADK local state
 .adk/

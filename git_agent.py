@@ -6,9 +6,12 @@ Conventional Commit message, and only commits after explicit user confirmation.
 
 from __future__ import annotations
 
+import argparse
+import json
 import asyncio
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -534,5 +537,75 @@ async def main() -> None:
     await _chat_loop(runner)
 
 
+def _print_result(result: dict[str, Any]) -> None:
+    try:
+        print(json.dumps(result, indent=2))
+    except Exception:
+        print(result)
+
+
+def run_cli(argv: list[str] | None = None) -> int:
+    """Run a small CLI wrapper to call the agent helper functions.
+
+    Usage examples:
+      git_agent.py auto-pr --message "Fix bug" --title "Fix: bug"
+      git_agent.py commit --message "chore: update"
+      git_agent.py branch --name feature/xyz
+      git_agent.py pr --title "My PR" --body "Details"
+    """
+
+    parser = argparse.ArgumentParser(prog="git_commit_copilot")
+    parser.add_argument("--repo", help="Path to the git repository", default=None)
+    subparsers = parser.add_subparsers(dest="cmd")
+
+    p_auto = subparsers.add_parser("auto-pr", help="Create branch, commit, push, and open PR")
+    p_auto.add_argument("--message", required=True, help="Commit message (staged changes expected)")
+    p_auto.add_argument("--title", required=False, help="PR title")
+    p_auto.add_argument("--body", required=False, help="PR body")
+    p_auto.add_argument("--base", required=False, help="PR base branch (defaults to repo default)")
+
+    p_commit = subparsers.add_parser("commit", help="Create a git commit with provided message")
+    p_commit.add_argument("--message", required=True)
+
+    p_branch = subparsers.add_parser("branch", help="Create and switch to a branch")
+    p_branch.add_argument("--name", required=True)
+
+    p_pr = subparsers.add_parser("pr", help="Create a GitHub PR using gh CLI")
+    p_pr.add_argument("--title", required=True)
+    p_pr.add_argument("--body", required=False)
+    p_pr.add_argument("--base", required=False)
+
+    args = parser.parse_args(argv)
+
+    if args.repo:
+        os.environ["GIT_REPO_PATH"] = args.repo
+
+    if args.cmd == "auto-pr":
+        res = auto_branch_commit_and_pr(args.message, args.title, args.body, args.base, None)
+        _print_result(res)
+        return 0 if res.get("status") == "success" else 2
+
+    if args.cmd == "commit":
+        res = execute_git_commit(args.message, None)
+        _print_result(res)
+        return 0 if res.get("status") == "success" else 2
+
+    if args.cmd == "branch":
+        res = create_branch(args.name, None)
+        _print_result(res)
+        return 0 if res.get("status") == "success" else 2
+
+    if args.cmd == "pr":
+        res = create_github_pr(args.title, args.body or "", args.base, None)
+        _print_result(res)
+        return 0 if res.get("status") == "success" else 2
+
+    parser.print_help()
+    return 1
+
+
 if __name__ == "__main__":
+    # If any CLI args are provided, run the CLI mode; otherwise start interactive chat.
+    if len(sys.argv) > 1:
+        raise SystemExit(run_cli())
     asyncio.run(main())
