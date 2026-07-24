@@ -736,6 +736,42 @@ def run_cli(argv: list[str] | None = None) -> int:
                 print("\nFinal commit message:\n")
                 print(message)
 
+            # Validate and optionally auto-fix or re-edit
+            attempts = 0
+            while attempts < 3:
+                val = validate_conventional_commit(message)
+                if val.get("valid"):
+                    break
+                print("\nConventional Commit validation issues:")
+                for err in val.get("errors", []):
+                    print(f"- {err}")
+
+                try:
+                    fix_choice = input("Auto-apply suggested fix and continue? (Y/n): ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    fix_choice = "y"
+
+                if fix_choice in ("", "y", "yes"):
+                    message = val.get("suggested_message") or message
+                    print("\nApplied suggested commit message:\n")
+                    print(message)
+                    break
+                else:
+                    try:
+                        reedit = input("Open editor to modify message? (Y/n): ").strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        reedit = "n"
+
+                    if reedit in ("", "y", "yes"):
+                        message = edit_with_editor(message)
+                        print("\nEdited commit message:\n")
+                        print(message)
+                        attempts += 1
+                        continue
+                    else:
+                        # user declined fixes; proceed with current message
+                        break
+
         res = auto_branch_commit_and_pr(message, args.title, args.body, args.base, None)
         _print_result(res)
         return 0 if res.get("status") == "success" else 2
@@ -783,6 +819,66 @@ def edit_with_editor(initial_text: str) -> str:
             os.remove(path)
         except Exception:
             pass
+
+
+def validate_conventional_commit(message: str) -> dict[str, Any]:
+    """Validate and suggest fixes for a Conventional Commit message.
+
+    Checks:
+      - Subject prefix (feat|fix|chore|docs|style|refactor|perf|test)
+      - Subject line length <= 50
+      - Blank line between subject and body when body exists
+
+    Returns a dict with `valid` boolean, `errors` list, and `suggested_message`.
+    """
+
+    if message is None:
+        return {"valid": False, "errors": ["Empty message"], "suggested_message": ""}
+
+    lines = message.strip().splitlines()
+    subject = lines[0] if lines else ""
+    body = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
+
+    errors: list[str] = []
+    suggested = subject
+
+    # check prefix
+    prefixes = ("feat:", "fix:", "chore:", "docs:", "style:", "refactor:", "perf:", "test:")
+    lower_sub = subject.lower()
+    if not any(lower_sub.startswith(p) for p in prefixes):
+        # attempt to infer prefix
+        if any(k in lower_sub for k in ("fix", "bug", "error", "typo")):
+            pref = "fix:"
+        elif any(k in lower_sub for k in ("doc", "readme", "comment", "documentation")):
+            pref = "docs:"
+        elif any(k in lower_sub for k in ("refactor", "cleanup", "restructure")):
+            pref = "refactor:"
+        elif any(k in lower_sub for k in ("add ", "new ", "implement", "feature")):
+            pref = "feat:"
+        else:
+            pref = "chore:"
+
+        suggested = f"{pref} {subject}".strip()
+        errors.append("Missing conventional commit prefix; suggested prefix added.")
+
+    # subject length
+    if len(subject) > 50:
+        errors.append(f"Subject longer than 50 chars ({len(subject)})")
+        # truncate suggested subject to 50 chars
+        sug_subject = (suggested[:47].rstrip() + "...") if len(suggested) > 50 else suggested
+        suggested = sug_subject
+
+    # body separation
+    if body and (len(lines) > 1 and lines[1].strip() != ""):
+        errors.append("Missing blank line between subject and body")
+        suggested = suggested + "\n\n" + body
+
+    valid = len(errors) == 0
+    suggested_message = suggested
+    if body and "\n\n" not in suggested_message:
+        suggested_message = suggested_message + ("\n\n" + body if body else "")
+
+    return {"valid": valid, "errors": errors, "suggested_message": suggested_message}
 
 
 if __name__ == "__main__":
