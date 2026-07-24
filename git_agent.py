@@ -32,6 +32,7 @@ import datetime
 import shutil
 import requests
 from urllib.parse import urlparse
+import time
 
 
 ENV_FILE = Path(__file__).with_name(".env")
@@ -505,11 +506,29 @@ def create_or_update_pr(title: str, body: str, base: str | None, tool_context: T
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
 
     # Check for existing PR for this head
+    def _http_request_with_retry(method: str, url: str, max_retries: int = None, backoff_base: float = None, **kwargs):
+        max_retries = int(max_retries or os.getenv("GITHUB_API_RETRIES", "3"))
+        backoff_base = float(backoff_base or os.getenv("GITHUB_API_BACKOFF", "1"))
+        attempt = 0
+        while True:
+            try:
+                resp = requests.request(method, url, timeout=10, **kwargs)
+                # Retry on 5xx
+                if resp.status_code >= 500:
+                    raise requests.HTTPError(f"Server error: {resp.status_code}")
+                return resp
+            except Exception as exc:
+                attempt += 1
+                if attempt > max_retries:
+                    raise
+                sleep_for = backoff_base * (2 ** (attempt - 1))
+                time.sleep(sleep_for)
+
     try:
         params = {"head": f"{owner}:{branch}"}
         if base:
             params["base"] = base
-        r = requests.get(f"{api_base}/pulls", headers=headers, params=params, timeout=10)
+        r = _http_request_with_retry("GET", f"{api_base}/pulls", headers=headers, params=params)
         r.raise_for_status()
         prs = r.json()
     except Exception as exc:
@@ -521,7 +540,7 @@ def create_or_update_pr(title: str, body: str, base: str | None, tool_context: T
         pr_number = pr.get("number")
         try:
             payload = {"title": title, "body": body}
-            r = requests.patch(f"{api_base}/pulls/{pr_number}", headers=headers, json=payload, timeout=10)
+            r = _http_request_with_retry("PATCH", f"{api_base}/pulls/{pr_number}", headers=headers, json=payload)
             r.raise_for_status()
             return {"status": "success", "action": "updated", "pr": r.json()}
         except Exception as exc:
@@ -530,7 +549,7 @@ def create_or_update_pr(title: str, body: str, base: str | None, tool_context: T
     # Create a new PR
     try:
         payload = {"title": title, "head": branch, "base": base or "main", "body": body}
-        r = requests.post(f"{api_base}/pulls", headers=headers, json=payload, timeout=10)
+        r = _http_request_with_retry("POST", f"{api_base}/pulls", headers=headers, json=payload)
         r.raise_for_status()
         return {"status": "success", "action": "created", "pr": r.json()}
     except Exception as exc:
