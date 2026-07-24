@@ -12,6 +12,8 @@ import asyncio
 import os
 import subprocess
 import sys
+import tempfile
+import platform
 from pathlib import Path
 from typing import Any
 
@@ -720,6 +722,20 @@ def run_cli(argv: list[str] | None = None) -> int:
                 heuristic_res = generate_commit_message(None)
                 message = heuristic_res.get("commit_message")
 
+        # Allow interactive editing of the generated message when running in a TTY
+        if sys.stdin.isatty():
+            print("\nGenerated commit message:\n")
+            print(message)
+            try:
+                edit_choice = input("\nEdit commit message before applying? (y/N): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                edit_choice = "n"
+
+            if edit_choice == "y":
+                message = edit_with_editor(message)
+                print("\nFinal commit message:\n")
+                print(message)
+
         res = auto_branch_commit_and_pr(message, args.title, args.body, args.base, None)
         _print_result(res)
         return 0 if res.get("status") == "success" else 2
@@ -741,6 +757,32 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     parser.print_help()
     return 1
+
+
+def edit_with_editor(initial_text: str) -> str:
+    """Open the user's editor to edit `initial_text` and return the result."""
+
+    editor = os.getenv("VISUAL") or os.getenv("EDITOR")
+    if not editor:
+        if platform.system() == "Windows":
+            editor = "notepad"
+        else:
+            editor = "vi"
+
+    with tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".md") as tf:
+        tf.write(initial_text)
+        tf.flush()
+        path = tf.name
+
+    try:
+        subprocess.run([editor, path])
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    finally:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
