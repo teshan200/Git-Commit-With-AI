@@ -386,7 +386,7 @@ def create_github_pr(title: str, body: str, base: str | None, tool_context: Tool
         return {"status": "error", "error_message": "Failed to create PR.", "gh_output": output}
 
 
-def auto_branch_commit_and_pr(commit_message: str, pr_title: str | None, pr_body: str | None, base: str | None, tool_context: ToolContext) -> dict[str, Any]:
+def auto_branch_commit_and_pr(commit_message: str, pr_title: str | None, pr_body: str | None, base: str | None, tool_context: ToolContext, dry_run: bool = False) -> dict[str, Any]:
     """Orchestrate branch creation, commit, push, and PR creation.
 
     This expects the changes to already be staged. It will:
@@ -399,6 +399,15 @@ def auto_branch_commit_and_pr(commit_message: str, pr_title: str | None, pr_body
     branch_name = f"improvement/{timestamp}"
 
     # 1) create branch
+    if dry_run:
+        planned = {
+            "branch": branch_name,
+            "commit_message": commit_message,
+            "push": f"git push -u origin {branch_name}",
+            "pr": "will create or update PR via API if GITHUB_TOKEN else gh CLI",
+        }
+        return {"status": "success", "dry_run": True, "plan": planned}
+
     branch_res = create_branch(branch_name, tool_context)
     if branch_res.get("status") != "success":
         return {"status": "error", "step": "create_branch", "result": branch_res}
@@ -788,6 +797,7 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     p_auto = subparsers.add_parser("auto-pr", help="Create branch, commit, push, and open PR")
     p_auto.add_argument("--message", required=False, help="Commit message (staged changes expected). If omitted, a message will be generated.")
+    p_auto.add_argument("--dry-run", dest="dry_run", action="store_true", help="Preview actions without making changes")
     p_auto.add_argument("--title", required=False, help="PR title")
     p_auto.add_argument("--body", required=False, help="PR body")
     p_auto.add_argument("--base", required=False, help="PR base branch (defaults to repo default)")
@@ -879,7 +889,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                         # user declined fixes; proceed with current message
                         break
 
-        res = auto_branch_commit_and_pr(message, args.title, args.body, args.base, None)
+        res = auto_branch_commit_and_pr(message, args.title, args.body, args.base, None, dry_run=args.dry_run)
         _print_result(res)
         return 0 if res.get("status") == "success" else 2
 
