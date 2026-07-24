@@ -484,6 +484,72 @@ def generate_commit_message(tool_context: ToolContext) -> dict[str, Any]:
     return {"status": "success", "commit_message": commit_message, "generated_by": "heuristic"}
 
 
+def generate_commit_message_model(tool_context: ToolContext) -> dict[str, Any]:
+    """Attempt to generate a commit message using the GenAI model.
+
+    If the model client isn't available or a call fails, returns an error dict
+    so callers can fall back to the heuristic generator.
+    """
+
+    diff_res = get_staged_diff(tool_context)
+    if diff_res.get("status") != "success":
+        return {"status": "error", "error_message": "No staged diff available.", "details": diff_res}
+
+    diff = diff_res.get("diff", "")
+    if not diff:
+        return {"status": "warning", "message": "No staged changes to summarize.", "commit_message": ""}
+
+    prompt = (
+        "You are an assistant that writes Conventional Commit messages. "
+        "Given the following git diff, produce a single concise Conventional Commit message (subject under 50 chars), "
+        "and, if helpful, a short body. Output only the commit message.\n\n"
+        f"DIFF:\n{diff}"
+    )
+
+    try:
+        # Try a few possible client patterns for different installed genai versions.
+        genai = __import__("google.genai")
+    except Exception:
+        return {"status": "error", "error_message": "google.genai not installed"}
+
+    try:
+        # preferred pattern: genai.text.generate
+        if hasattr(genai, "text") and hasattr(genai.text, "generate"):
+            resp = genai.text.generate(model=DEFAULT_MODEL, input=prompt)
+            text = getattr(resp, "text", None) or getattr(resp, "output", None)
+        # alternative: genai.generate_text
+        elif hasattr(genai, "generate_text"):
+            resp = genai.generate_text(model=DEFAULT_MODEL, prompt=prompt)
+            text = getattr(resp, "output", None) or getattr(resp, "text", None)
+        else:
+            return {"status": "error", "error_message": "Unsupported google.genai API surface"}
+
+        # Extract string from response flexibly
+        if isinstance(text, str):
+            commit_message = text.strip()
+        else:
+            # try common nested structures
+            commit_message = ""
+            try:
+                if isinstance(text, list) and text:
+                    # look for .content or .text
+                    first = text[0]
+                    commit_message = getattr(first, "text", "") or getattr(first, "content", "") or str(first)
+                else:
+                    commit_message = str(text)
+            except Exception:
+                commit_message = str(text)
+
+        commit_message = commit_message.strip()
+        # safeguard: ensure it's not empty
+        if not commit_message:
+            return {"status": "error", "error_message": "Model returned empty message"}
+
+        return {"status": "success", "commit_message": commit_message, "generated_by": "model"}
+    except Exception as exc:
+        return {"status": "error", "error_message": "Model call failed", "details": str(exc)}
+
+
 root_agent = Agent(
     name="git_commit_copilot",
     model=DEFAULT_MODEL,
@@ -618,7 +684,7 @@ def run_cli(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="cmd")
 
     p_auto = subparsers.add_parser("auto-pr", help="Create branch, commit, push, and open PR")
-    p_auto.add_argument("--message", required=True, help="Commit message (staged changes expected)")
+    p_auto.add_argument("--message", required=False, help="Commit message (staged changes expected). If omitted, a message will be generated.")
     p_auto.add_argument("--title", required=False, help="PR title")
     p_auto.add_argument("--body", required=False, help="PR body")
     p_auto.add_argument("--base", required=False, help="PR base branch (defaults to repo default)")
@@ -640,7 +706,21 @@ def run_cli(argv: list[str] | None = None) -> int:
         os.environ["GIT_REPO_PATH"] = args.repo
 
     if args.cmd == "auto-pr":
-        res = auto_branch_commit_and_pr(args.message, args.title, args.body, args.base, None)
+        message = args.message
+        if not message:
+            # Try model-backed generation, fall back to heuristic
+            try:
+                model_res = generate_commit_message_model(None)
+            except Exception:
+                model_res = {"status": "error", "error_message": "model generation failed"}
+
+            if model_res.get("status") == "success":
+                message = model_res.get("commit_message")
+            else:
+                heuristic_res = generate_commit_message(None)
+                message = heuristic_res.get("commit_message")
+
+        res = auto_branch_commit_and_pr(message, args.title, args.body, args.base, None)
         _print_result(res)
         return 0 if res.get("status") == "success" else 2
 
