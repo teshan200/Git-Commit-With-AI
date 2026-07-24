@@ -1,3 +1,84 @@
+# Git Commit Copilot
+
+Lightweight developer tool to generate conventional commits, automate branching/PRs, and preview changelogs — with a small Flask dashboard for summaries.
+
+What this repo provides
+- CLI agent: `git_agent.py` — AI-assisted commit messages (heuristic + model), branch/commit/push, PR upsert, changelog and summarizer.
+- Helpers: `git_helpers.py` — pure functions for validation and heuristic commit generation (used by tests).
+- Tests: `tests/test_helpers.py` — unit tests for helper functions, runnable with `pytest`.
+- Dashboard: `webapp.py` — small Flask dashboard that shells out to the CLI to show `/summary` and `/changelog`.
+- CI: `.github/workflows/python-ci.yml` — runs tests on push/PR.
+- Environment template: `.env.example`
+
+Top-level features implemented
+- Conventional commit validation and a commit-msg hook installer.
+- Heuristic and model-backed commit message generation (model calls are optional; fallbacks included).
+- Automated branch -> commit -> push -> PR orchestration (dry-run supported).
+- Changelog generation and repo diff summarizer.
+- In-memory caching and token auth for the dashboard endpoints.
+- Unit tests for helpers and a CI workflow to run them.
+
+Quickstart (Windows / PowerShell)
+1. Create and activate a virtualenv and install dependencies:
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+2. Run unit tests:
+```powershell
+# tests import helpers and should not require model keys; set a dummy key only if imports fail
+#$env:GOOGLE_API_KEY = 'test-key'
+pytest -q
+```
+
+3. Run the dashboard locally:
+```powershell
+# optional: set a token and short cache for testing
+#$env:DASHBOARD_TOKEN = 'secret123'
+#$env:GITCOPILOT_CACHE_TTL = '5'
+python webapp.py
+```
+Open http://localhost:5000/ in your browser.
+
+Dashboard endpoints
+- `/` — index with links.
+- `/summary` — runs `git_agent.py summarize --format json` and returns JSON summary. Supports `?repo=<path>` to target another repo. Protected by `DASHBOARD_TOKEN` if set; send header `X-API-KEY` or `?token=`.
+- `/changelog` — runs `git_agent.py changelog --dry-run` and returns a Markdown preview. Also cached.
+
+Environment variables
+- `GOOGLE_API_KEY` — optional for model-backed commit generation.
+- `GIT_REPO_PATH` — optional default repo path used by the CLI.
+- `GEMINI_MODEL` — optional model name used by the AI generator.
+- `DASHBOARD_TOKEN` — if set, dashboard endpoints require this token (header `X-API-KEY` or query `?token=`).
+- `GITCOPILOT_CACHE_TTL` — cache TTL in seconds for the dashboard (default 60).
+
+Notes and troubleshooting
+- If the CLI commands fail, run them directly to see detailed errors:
+```powershell
+python git_agent.py summarize --format json
+python git_agent.py changelog --dry-run
+```
+- If imports fail due to model libraries, set `GOOGLE_API_KEY` to a dummy value while running tests, or install the optional model packages.
+- Cache is in-memory; restart clears it. For production use, swap to Redis or a persistent cache.
+
+Security
+- The dashboard shells out to the CLI and should not be exposed publicly without securing `DASHBOARD_TOKEN` and using TLS. Treat tokens like secrets and store them in your environment/CI secrets.
+
+Next steps you can ask me to do
+- Add a minimal React UI for the dashboard.
+- Persist cache to Redis and add a `--no-cache` flag.
+- Add more unit tests covering CLI dry-run flows and PR upsert (with mocks).
+
+Files to inspect
+- [git_agent.py](git_agent.py)
+- [webapp.py](webapp.py)
+- [git_helpers.py](git_helpers.py)
+- [tests/test_helpers.py](tests/test_helpers.py)
+
+If you want, I can run the unit tests from here and report results, or add a small README badge and CI coverage — tell me which next.
 # Git Commit With AI
 
 Git Commit With AI is an interactive AI agent built with Google ADK that reviews staged Git changes, generates Conventional Commit messages, asks for confirmation, creates the commit, and can push the commit to GitHub.
