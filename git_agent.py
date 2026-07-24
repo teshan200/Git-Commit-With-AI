@@ -425,6 +425,65 @@ def auto_branch_commit_and_pr(commit_message: str, pr_title: str | None, pr_body
     }
 
 
+def generate_commit_message(tool_context: ToolContext) -> dict[str, Any]:
+    """Generate a Conventional Commit message from the staged diff using a heuristic.
+
+    Falls back to a simple heuristic when no model call is available.
+    """
+
+    diff_res = get_staged_diff(tool_context)
+    if diff_res.get("status") != "success":
+        return {"status": "error", "error_message": "No staged diff available.", "details": diff_res}
+
+    diff = diff_res.get("diff", "")
+    if not diff:
+        return {"status": "warning", "message": "No staged changes to summarize.", "commit_message": ""}
+
+    added = sum(1 for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++"))
+    removed = sum(1 for l in diff.splitlines() if l.startswith("-") and not l.startswith("---"))
+
+    lower = diff.lower()
+    if any(k in lower for k in ("fix", "bug", "error", "panic", "typo")):
+        prefix = "fix:"
+    elif any(k in lower for k in ("add ", "new file", "create ", "implement ", "feature")) or added > removed:
+        prefix = "feat:"
+    elif any(k in lower for k in ("doc", "readme", "comment", "documentation")):
+        prefix = "docs:"
+    elif any(k in lower for k in ("refactor", "cleanup", "restructure")):
+        prefix = "refactor:"
+    elif any(k in lower for k in ("format", "style", "whitespace")):
+        prefix = "style:"
+    else:
+        prefix = "chore:"
+
+    # attempt to extract first changed filename
+    filenames = []
+    for line in diff.splitlines():
+        if line.startswith("diff --git"):
+            parts = line.split()
+            if len(parts) >= 3:
+                # format: diff --git a/path b/path
+                a = parts[2]
+                if a.startswith("a/"):
+                    filenames.append(a[2:])
+
+    subject = f"{prefix} update {filenames[0] if filenames else ''}".strip()
+    if len(subject) > 50:
+        subject = subject[:47].rstrip() + "..."
+
+    body_lines = []
+    body_lines.append(f"Changes: +{added} / -{removed} (staged)")
+    if filenames:
+        body_lines.append("Files changed:")
+        for f in filenames[:5]:
+            body_lines.append(f"- {f}")
+
+    body = "\n".join(body_lines)
+    commit_message = subject + ("\n\n" + body if body else "")
+
+    return {"status": "success", "commit_message": commit_message, "generated_by": "heuristic"}
+
+
 root_agent = Agent(
     name="git_commit_copilot",
     model=DEFAULT_MODEL,
@@ -455,7 +514,7 @@ root_agent = Agent(
         "9. If no repository has been set for the session, ask the user to paste"
         " the repo path and call set_repo_path before using any git tools."
     ),
-    tools=[set_repo_path, get_staged_diff, get_git_context, execute_git_commit, execute_git_push, create_branch, create_github_pr, auto_branch_commit_and_pr],
+    tools=[set_repo_path, get_staged_diff, get_git_context, generate_commit_message, execute_git_commit, execute_git_push, create_branch, create_github_pr, auto_branch_commit_and_pr],
 )
 
 
