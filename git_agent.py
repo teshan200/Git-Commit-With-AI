@@ -23,6 +23,8 @@ except ImportError:  # pragma: no cover - compatibility fallback for older SDKs.
     CLIRunner = InMemoryRunner
 
 from google.genai import types
+import datetime
+import shutil
 
 
 ENV_FILE = Path(__file__).with_name(".env")
@@ -321,6 +323,105 @@ def execute_git_commit(commit_message: str, tool_context: ToolContext) -> dict[s
         }
 
 
+def create_branch(branch_name: str, tool_context: ToolContext) -> dict[str, Any]:
+    """Create and switch to a new branch with the given name.
+
+    Returns a status dict with the branch name or an error message.
+    """
+
+    try:
+        repo_path = _get_active_repo_path(tool_context)
+        subprocess.run(
+            ["git", "checkout", "-b", branch_name],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=_resolve_repo_root(repo_path),
+        )
+        return {"status": "success", "branch": branch_name}
+    except FileNotFoundError:
+        return {"status": "error", "error_message": "git was not found on PATH."}
+    except subprocess.CalledProcessError as exc:
+        output = (exc.stdout or exc.stderr or "").strip()
+        return {"status": "error", "error_message": "Failed to create branch.", "git_output": output}
+
+
+def create_github_pr(title: str, body: str, base: str | None, tool_context: ToolContext) -> dict[str, Any]:
+    """Create a GitHub PR using the `gh` CLI if available.
+
+    Falls back with an informative error if `gh` isn't installed.
+    """
+
+    if shutil.which("gh") is None:
+        return {
+            "status": "error",
+            "error_message": "GitHub CLI `gh` not found on PATH. Install `gh` or create the PR manually.",
+        }
+
+    try:
+        repo_path = _get_active_repo_path(tool_context)
+        # If base is not provided, let gh prompt or default to repository default branch.
+        cmd = ["gh", "pr", "create", "--title", title, "--body", body]
+        if base:
+            cmd += ["--base", base]
+
+        completed = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=_resolve_repo_root(repo_path),
+        )
+        output = (completed.stdout or completed.stderr or "").strip()
+        return {"status": "success", "message": "PR created.", "gh_output": output}
+    except subprocess.CalledProcessError as exc:
+        output = (exc.stdout or exc.stderr or "").strip()
+        return {"status": "error", "error_message": "Failed to create PR.", "gh_output": output}
+
+
+def auto_branch_commit_and_pr(commit_message: str, pr_title: str | None, pr_body: str | None, base: str | None, tool_context: ToolContext) -> dict[str, Any]:
+    """Orchestrate branch creation, commit, push, and PR creation.
+
+    This expects the changes to already be staged. It will:
+    1. Create a timestamped branch named `improvement/YYYYMMDD-HHMMSS`.
+    2. Commit using `commit_message`.
+    3. Push the branch and create a PR with `pr_title`/`pr_body`.
+    """
+
+    timestamp = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    branch_name = f"improvement/{timestamp}"
+
+    # 1) create branch
+    branch_res = create_branch(branch_name, tool_context)
+    if branch_res.get("status") != "success":
+        return {"status": "error", "step": "create_branch", "result": branch_res}
+
+    # 2) commit
+    commit_res = execute_git_commit(commit_message, tool_context)
+    if commit_res.get("status") != "success":
+        return {"status": "error", "step": "commit", "result": commit_res}
+
+    # 3) push
+    push_res = execute_git_push(tool_context)
+    if push_res.get("status") != "success":
+        return {"status": "error", "step": "push", "result": push_res}
+
+    # 4) create PR
+    title = pr_title or (commit_message.splitlines()[0] if commit_message else branch_name)
+    body = pr_body or commit_message
+    pr_res = create_github_pr(title, body, base, tool_context)
+    if pr_res.get("status") != "success":
+        return {"status": "error", "step": "create_pr", "result": pr_res}
+
+    return {
+        "status": "success",
+        "branch": branch_name,
+        "commit": commit_res,
+        "push": push_res,
+        "pr": pr_res,
+    }
+
+
 root_agent = Agent(
     name="git_commit_copilot",
     model=DEFAULT_MODEL,
@@ -351,7 +452,7 @@ root_agent = Agent(
         "9. If no repository has been set for the session, ask the user to paste"
         " the repo path and call set_repo_path before using any git tools."
     ),
-    tools=[set_repo_path, get_staged_diff, get_git_context, execute_git_commit, execute_git_push],
+    tools=[set_repo_path, get_staged_diff, get_git_context, execute_git_commit, execute_git_push, create_branch, create_github_pr, auto_branch_commit_and_pr],
 )
 
 
