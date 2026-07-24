@@ -33,6 +33,7 @@ import shutil
 import requests
 from urllib.parse import urlparse
 import time
+import re
 
 
 ENV_FILE = Path(__file__).with_name(".env")
@@ -841,6 +842,11 @@ def run_cli(argv: list[str] | None = None) -> int:
     p_upsert.add_argument("--base", required=False)
     p_upsert.add_argument("--dry-run", dest="dry_run", action="store_true", help="Preview PR create/update without contacting GitHub")
 
+    p_changelog = subparsers.add_parser("changelog", help="Generate CHANGELOG.md from Conventional Commit messages")
+    p_changelog.add_argument("--since", required=False, help="Git ref (tag/commit) to start from (defaults to most recent tag)")
+    p_changelog.add_argument("--output", required=False, default="CHANGELOG.md", help="Output file (default: CHANGELOG.md)")
+    p_changelog.add_argument("--dry-run", dest="dry_run", action="store_true", help="Print changelog to stdout instead of writing file")
+
     args = parser.parse_args(argv)
 
     if args.repo:
@@ -959,6 +965,11 @@ def run_cli(argv: list[str] | None = None) -> int:
                 _print_result({"status": "error", "error_message": "Failed to preview PR upsert", "details": str(exc)})
                 return 2
         res = create_or_update_pr(args.title, args.body or "", args.base, None)
+        _print_result(res)
+        return 0 if res.get("status") == "success" else 2
+
+    if args.cmd == "changelog":
+        res = generate_changelog(args.since, args.output, None, dry_run=args.dry_run)
         _print_result(res)
         return 0 if res.get("status") == "success" else 2
 
@@ -1107,6 +1118,87 @@ if __name__ == '__main__':
         return {"status": "success", "message": f"Installed commit-msg hook at {hook_path}"}
     except Exception as exc:
         return {"status": "error", "error_message": "Failed to write hook", "details": str(exc)}
+
+
+def generate_changelog(since: str | None, output: str, tool_context: ToolContext, dry_run: bool = False) -> dict[str, Any]:
+    """Generate a simple CHANGELOG.md grouped by Conventional Commit types.
+
+    If `since` is provided, only include commits after that ref (exclusive). If not, uses the most recent git tag.
+    """
+
+    try:
+        repo_path = _get_active_repo_path(tool_context) or str(Path.cwd())
+    except Exception:
+        repo_path = str(Path.cwd())
+
+    # determine since ref
+    since_ref = since
+    if not since_ref:
+        try:
+            since_ref = _run_git_command(["git", "describe", "--tags", "--abbrev=0"], repo_path)
+        except subprocess.CalledProcessError:
+            since_ref = None
+
+    git_fmt = "%H%x1f%ad%x1f%s%x1f%b%x1e"
+    cmd = ["git", "log", "--no-merges", f"--pretty=format:{git_fmt}"]
+    if since_ref:
+        cmd.append(f"{since_ref}..HEAD")
+
+    try:
+        raw = subprocess.check_output(cmd, cwd=repo_path, text=True, encoding="utf-8", errors="replace")
+    except subprocess.CalledProcessError as exc:
+        return {"status": "error", "error_message": "git log failed", "details": str(exc)}
+
+    records = [r for r in raw.split("\x1e") if r.strip()]
+    commits = []
+    for rec in records:
+        parts = rec.split("\x1f")
+        if len(parts) < 4:
+            continue
+        sha, date, subject, body = parts[0], parts[1], parts[2], parts[3]
+        commits.append({"sha": sha, "date": date, "subject": subject.strip(), "body": body.strip()})
+
+    pattern = re.compile(r"^(?P<type>feat|fix|chore|docs|style|refactor|perf|test)(?:\((?P<scope>[^)]+)\))?:\s*(?P<desc>.+)$", re.IGNORECASE)
+    groups: dict[str, list[dict[str,str]]] = {}
+    others: list[dict[str,str]] = []
+    for c in commits:
+        m = pattern.match(c["subject"])
+        if m:
+            t = m.group("type").lower()
+            desc = m.group("desc")
+            groups.setdefault(t, []).append({"desc": desc, "sha": c["sha"], "date": c["date"]})
+        else:
+            others.append({"desc": c["subject"], "sha": c["sha"], "date": c["date"]})
+
+    # Build changelog markdown
+    lines: list[str] = []
+    header = f"# Changelog\n\nGenerated on {datetime.datetime.utcnow().isoformat()}Z"
+    lines.append(header)
+
+    order = ["feat", "fix", "perf", "refactor", "docs", "style", "test", "chore"]
+    for key in order:
+        items = groups.get(key, [])
+        if not items:
+            continue
+        lines.append(f"\n## {key.capitalize()}\n")
+        for it in items:
+            lines.append(f"- {it['desc']} ({it['sha'][:7]})")
+
+    if others:
+        lines.append("\n## Other\n")
+        for it in others:
+            lines.append(f"- {it['desc']} ({it['sha'][:7]})")
+
+    content = "\n".join(lines)
+    if dry_run:
+        return {"status": "success", "dry_run": True, "changelog": content}
+
+    try:
+        with open(output, "w", encoding="utf-8") as f:
+            f.write(content)
+        return {"status": "success", "message": f"Wrote changelog to {output}", "path": output}
+    except Exception as exc:
+        return {"status": "error", "error_message": "Failed to write changelog", "details": str(exc)}
 
 
 if __name__ == "__main__":
