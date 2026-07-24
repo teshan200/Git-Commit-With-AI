@@ -2,3 +2,5 @@ python-dotenv
 google-genai
 google-adk
 requests
+pytest
+flask
