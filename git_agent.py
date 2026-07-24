@@ -702,6 +702,8 @@ def run_cli(argv: list[str] | None = None) -> int:
     p_pr.add_argument("--body", required=False)
     p_pr.add_argument("--base", required=False)
 
+    p_install = subparsers.add_parser("install-hook", help="Install commit-msg hook to enforce Conventional Commits")
+
     args = parser.parse_args(argv)
 
     if args.repo:
@@ -788,6 +790,11 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     if args.cmd == "pr":
         res = create_github_pr(args.title, args.body or "", args.base, None)
+        _print_result(res)
+        return 0 if res.get("status") == "success" else 2
+
+    if args.cmd == "install-hook":
+        res = install_commit_msg_hook(None)
         _print_result(res)
         return 0 if res.get("status") == "success" else 2
 
@@ -879,6 +886,63 @@ def validate_conventional_commit(message: str) -> dict[str, Any]:
         suggested_message = suggested_message + ("\n\n" + body if body else "")
 
     return {"valid": valid, "errors": errors, "suggested_message": suggested_message}
+
+
+def install_commit_msg_hook(tool_context: ToolContext) -> dict[str, Any]:
+    """Install a Python-based commit-msg hook into the repo's .git/hooks.
+
+    The hook calls `validate_conventional_commit` from this module and
+    aborts the commit if validation fails.
+    """
+
+    try:
+        repo_root = _resolve_repo_root(_get_active_repo_path(tool_context))
+    except Exception as exc:
+        return {"status": "error", "error_message": "Cannot find git repository", "details": str(exc)}
+
+    hook_dir = repo_root / ".git" / "hooks"
+    if not hook_dir.exists():
+        return {"status": "error", "error_message": ".git/hooks directory not found"}
+
+    hook_path = hook_dir / "commit-msg"
+    hook_code = """#!/usr/bin/env python3
+import sys
+from pathlib import Path
+from git_agent import validate_conventional_commit
+
+def main():
+    if len(sys.argv) < 2:
+        print('No commit message file provided', file=sys.stderr)
+        sys.exit(1)
+    msgfile = Path(sys.argv[1])
+    msg = msgfile.read_text(encoding='utf-8')
+    res = validate_conventional_commit(msg)
+    if not res.get('valid'):
+        print('Conventional Commit validation failed:', file=sys.stderr)
+        for e in res.get('errors', []):
+            print('- ' + e, file=sys.stderr)
+        print('\nSuggested commit message:\n', file=sys.stderr)
+        print(res.get('suggested_message', ''), file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
+
+if __name__ == '__main__':
+    main()
+"""
+
+    try:
+        with open(hook_path, "w", encoding="utf-8") as f:
+            f.write(hook_code)
+        # Make executable where supported
+        try:
+            import os
+            os.chmod(hook_path, 0o755)
+        except Exception:
+            pass
+
+        return {"status": "success", "message": f"Installed commit-msg hook at {hook_path}"}
+    except Exception as exc:
+        return {"status": "error", "error_message": "Failed to write hook", "details": str(exc)}
 
 
 if __name__ == "__main__":

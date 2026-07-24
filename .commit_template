@@ -1,0 +1,9 @@
+# Conventional Commit template
+# Replace the bracketed parts when writing a commit.
+
+<type>(<scope>): <short summary under 50 chars>
+
+A longer description of the change. Explain the motivation and contrast
+with previous behavior. Wrap at ~72 characters.
+
+Footer: references (e.g. Closes #123)
